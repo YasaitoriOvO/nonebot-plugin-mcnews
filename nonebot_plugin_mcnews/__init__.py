@@ -1,15 +1,17 @@
 from nonebot.plugin import PluginMetadata
 from pydantic import BaseModel
+from typing import Optional, Union
 
 class MCNewsConfig(BaseModel):
     """Minecraft News 配置"""
     mcnews_debug: bool = False
-    mcnews_proxies: str = None  # 代理设置
-    mcnews_group_id: list[int | str] = []  # 要推送的QQ群列表
+    mcnews_proxies: Optional[str] = None  # 代理设置
+    mcnews_group_id: list[Union[int, str]] = []  # 要推送的QQ群列表
     mcnews_translate: bool = False  # 是否启用翻译
-    mcnews_translate_appid: int | str = None  # 百度翻译appid
-    mcnews_translate_appkey: str = None  # 百度翻译appkey
-    mcnews_translate_needintervene: int = 0  # 百度翻译是否使用术语库，0-不启用，1-启用
+    mcnews_translate_api_key: Optional[str] = None  # OpenAI 兼容接口 API Key
+    mcnews_translate_endpoint: Optional[str] = None  # OpenAI 兼容接口 endpoint/base URL
+    mcnews_translate_model: str = "gpt-4o-mini"  # 翻译使用的模型名称
+    mcnews_translate_timeout: int = 30  # 翻译请求超时时间（秒）
 
 __plugin_meta__ = PluginMetadata(
     name="MC新闻更新检测",
@@ -23,7 +25,6 @@ __plugin_meta__ = PluginMetadata(
 
 import httpx
 import json
-import random
 from nonebot.adapters.onebot.v11 import Message
 from nonebot import get_bots, require, logger, get_plugin_config
 
@@ -92,49 +93,94 @@ async def get_json(url: str, timeout: int = 30) -> dict:
             logger.error(traceback.format_exc())
         return {}
 
-def make_md5(s: str, encoding='utf-8') -> str:
-    from hashlib import md5
-    return md5(s.encode(encoding)).hexdigest()
+def build_chat_completions_url(endpoint: str) -> str:
+    """兼容 base URL 与完整 chat completions endpoint。"""
+    endpoint = endpoint.rstrip("/")
+    if endpoint.endswith("/chat/completions"):
+        return endpoint
+    return f"{endpoint}/chat/completions"
 
-async def baidu_translate_batch(texts: list[str]) -> list[str]:
-    """
-    批量翻译多个文本（title 和 desc），返回翻译后的列表，顺序与输入一致。
-    """  
-    
-    appid = config.mcnews_translate_appid
-    appkey = config.mcnews_translate_appkey
-    needIntervene = config.mcnews_translate_needintervene
-    
-    # 用换行符拼接多个要翻译的文本
-    query = "\n".join(texts)
-    salt = random.randint(32768, 65536)
-    sign = make_md5(str(appid) + query + str(salt) + appkey)
-
-    payload = {
-        "appid": str(appid),
-        "q": query,
-        "from": "en",
-        "to": "zh",
-        "salt": salt,
-        "sign": sign,
-        "needIntervene": needIntervene
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+def parse_translation_content(content: str, expected_count: int) -> Optional[list[str]]:
+    """解析模型返回的 JSON 翻译结果。"""
+    content = content.strip()
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if len(lines) >= 3:
+            content = "\n".join(lines[1:-1]).strip()
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post("http://api.fanyi.baidu.com/api/trans/vip/translate",
-                                         params=payload, headers=headers)
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        logger.error(f"大模型翻译结果不是合法 JSON: {content}")
+        return None
+
+    if isinstance(data, dict):
+        translations = data.get("translations")
+    elif isinstance(data, list):
+        translations = data
+    else:
+        translations = None
+
+    if not isinstance(translations, list) or len(translations) != expected_count:
+        logger.error(f"大模型翻译结果数量不匹配: {data}")
+        return None
+
+    if not all(isinstance(item, str) for item in translations):
+        logger.error(f"大模型翻译结果包含非字符串内容: {data}")
+        return None
+
+    return translations
+
+async def openai_translate_batch(texts: list[str]) -> Optional[list[str]]:
+    """
+    通过 OpenAI 兼容的 Chat Completions API 批量翻译文本。
+    返回顺序与输入一致；失败时返回 None，由调用方回退到原文。
+    """
+    api_key = config.mcnews_translate_api_key
+    endpoint = config.mcnews_translate_endpoint
+    model = config.mcnews_translate_model
+
+    if not api_key or not endpoint or not model:
+        logger.error("已启用翻译，但未完整配置 mcnews_translate_api_key / mcnews_translate_endpoint / mcnews_translate_model")
+        return None
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是 Minecraft 官方新闻翻译助手。"
+                    "请将用户提供的英文标题和摘要翻译为简体中文，保留 Minecraft、版本号、URL、代码、专有名词和原有换行含义。"
+                    "译文必须符合 Minecraft 游戏语境和官方简体中文译名习惯；方块、生物、物品、群系、更新名称、版本类型等游戏术语应优先使用 Minecraft 官方或社区通行译名，避免机械直译。"
+                    "必须只返回 JSON，格式为 {\"translations\": [\"译文1\", \"译文2\"]}，数组长度和输入完全一致。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(texts, ensure_ascii=False),
+            },
+        ],
+        "temperature": 0.2,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=config.mcnews_translate_timeout, proxy=proxy) as client:
+            response = await client.post(build_chat_completions_url(endpoint), json=payload, headers=headers)
+            response.raise_for_status()
             data = response.json()
-            if "trans_result" in data:
-                # trans_result 是 list，每个元素对应一段翻译
-                return [item["dst"] for item in data["trans_result"]]
-            else:
-                logger.error(f"百度翻译 API 返回异常: {data}")
-                return "调用百度翻译失败,请开发者前往后台查看具体错误信息。"
+            content = data["choices"][0]["message"]["content"]
+            return parse_translation_content(content, len(texts))
     except Exception as e:
-        logger.error(f"调用百度翻译失败: {e}")
-        return "调用百度翻译失败,请开发者前往后台查看具体错误信息。"
+        logger.error(f"调用大模型翻译失败: {e}")
+        if config.mcnews_debug:
+            import traceback
+            logger.error(traceback.format_exc())
+        return None
 
 async def broadcast_message(message: Message):
     """广播消息到设置的群组ID中"""
@@ -176,9 +222,9 @@ async def minecraft_news_schedule():
         
         for article in articles:
             default_tile = article["default_tile"]
-            title = default_tile["title"]
-            desc = default_tile["sub_header"]
-            article_url = article["article_url"]
+            title = default_tile.get("title") or ""
+            desc = default_tile.get("sub_header") or ""
+            article_url = article.get("article_url")
             
             if not title or not article_url:
                 continue
@@ -190,13 +236,15 @@ async def minecraft_news_schedule():
                 if first_run:
                     alist.append(title)
                 else:
-                    if config.mcnews_translate:
-                        tr_title, tr_desc = await baidu_translate_batch([title, desc])
+                    translated_texts = await openai_translate_batch([title, desc]) if config.mcnews_translate else None
+                    if translated_texts:
+                        tr_title, tr_desc = translated_texts
                         message = Message(
                             f"Minecraft 官网发布了新的文章：\n"
                             f"{title}\n{tr_title}\n\n"
                             f"{desc}\n{tr_desc}\n"
-                            f"{link}"
+                            f"{link}\n\n"
+                            f"（AI 生成，自主甄别）"
                         )
                     else:
                         message = Message(

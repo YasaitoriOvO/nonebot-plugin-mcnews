@@ -9,7 +9,7 @@
 - 定时从 [minecraft.net](https://www.minecraft.net) 拉取新闻文章
 - 定时从 [Minecraft Feedback](https://minecraftfeedback.zendesk.com/) 拉取最新文章
 - 在指定群组内发送更新通知消息
-- 可选：自动使用百度翻译 API 翻译新闻标题，并支持术语库干预
+- 可选：自动使用 OpenAI 兼容的大语言模型 API 翻译新闻标题与摘要
 
 ## 安装
 
@@ -57,32 +57,29 @@
 可通过 NoneBot2 配置文件（如`.env`）进行配置：
 
 | 配置项                      | 类型   | 默认值   | 说明                            |
-| ------------------------ | ---- | ----- | ----------------------------- |
-| `mcnews_debug`           | bool | False | 开启调试模式，输出异常堆栈                |
-| `mcnews_proixes`         | str | None    | 代理设置 |
-| `mcnews_group_id`           | int / str  | []    | 指定自动推送消息的群组 ID                    |
-|`mcnews_translate`| bool | False | 是否启用标题翻译功能（使用百度翻译API） |
-|`mcnews_translate_appid`|str|None| 百度翻译appid |
-|`mcnews_translate_appkey`|str|None| 百度翻译appkey |
-|`mcnews_translate_needintervene`|int|0|百度翻译是否使用术语库,0-不启用，1-启用|
+| ------------------------- | ---- | ----- | ----------------------------- |
+| `mcnews_debug`            | bool | False | 开启调试模式，输出异常堆栈                |
+| `mcnews_proxies`          | str | None    | 代理设置 |
+| `mcnews_group_id`         | int / str  | []    | 指定自动推送消息的群组 ID                    |
+| `mcnews_translate`        | bool | False | 是否启用新闻翻译功能 |
+| `mcnews_translate_api_key`|str|None| OpenAI 兼容接口 API Key |
+| `mcnews_translate_endpoint`|str|None| OpenAI 兼容接口 endpoint/base URL |
+| `mcnews_translate_model`  |str|gpt-4o-mini| 翻译使用的模型名称 |
+| `mcnews_translate_timeout`|int|30| 翻译请求超时时间（秒） |
 
-## 术语库使用说明
+### 翻译配置示例
 
-本插件提供了一个 **可选的翻译术语库文件**，用于改善百度翻译在处理 Minecraft 官方术语时的准确度。
+可在 NoneBot2 的 `.env` 中加入：
 
-###  如何使用术语库？
+```env
+mcnews_translate=true
+mcnews_translate_api_key=sk-xxxx
+mcnews_translate_endpoint=https://api.openai.com/v1
+mcnews_translate_model=gpt-4o-mini
+mcnews_translate_timeout=30
+```
 
-你可以将插件附带的术语库文件（`minecraft_terminology.txt`）直接上传至 **百度翻译开放平台**：
-
-> 登录百度翻译开放平台 → 我的术语库 → 导入术语
-
-上传后，即可在插件配置项中开启术语库功能（`mcnews_translate_needintervene=1`），使翻译结果能优先匹配术语库中的条目。
-
-###  重要提醒
-
-* 本术语库并非官方完整标准译名，仅收录了部分 **容易被错误翻译、影响阅读** 的术语；
-* 术语库会随着最新标准译名的更新 **持续扩充与维护**；
-* 如果你发现遗漏或错误的术语，欢迎提交 issue 反馈。
+`mcnews_translate_endpoint` 可以填写 OpenAI 兼容接口的 base URL（程序会自动拼接 `/chat/completions`），也可以直接填写完整的 `/chat/completions` endpoint。
 
 ## 鸣谢
 
